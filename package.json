@@ -1,0 +1,28 @@
+{
+  "name": "multi-channel-chat-app",
+  "version": "1.0.0",
+  "description": "Full-stack Node.js + Vue 2 multi-channel chat application",
+  "scripts": {
+    "install-all": "cd server && npm install && cd ../client && npm install",
+    "dev": "concurrently \"cd server && npm run dev\" \"cd client && npm run serve\"",
+    "start": "concurrently \"cd server && npm start\" \"cd client && npm run serve\"",
+    "build": "cd client && npm run build",
+    "test": "cd server && npm test",
+    "verify-env": "node verify-env.js"
+  },
+  "keywords": [
+    "chat",
+    "whatsapp",
+    "sms",
+    "nodejs",
+    "vue"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.0.1"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3"
+  }
+}
