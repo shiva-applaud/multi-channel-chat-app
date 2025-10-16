@@ -29,9 +29,9 @@ MONGODB_URI=mongodb://localhost:27017/multi_channel_chat
 # ============================================
 # Twilio Configuration
 # ============================================
-TWILIO_ACCOUNT_SID=
-TWILIO_USER_SID=
-TWILIO_AUTH_TOKEN=
+TWILIO_ACCOUNT_SID=AC4feda09c353acfaeae1756f285d6cad0
+TWILIO_USER_SID=USbd792e93f4d0373b305e5975ca4bc668
+TWILIO_AUTH_TOKEN=7afe4cf18bf0b8c9708badd63fa58e68
 TWILIO_PHONE_NUMBER=+15703251809
 
 # Production Auth Token (for later use)
