@@ -13,7 +13,7 @@ const crypto = require('crypto');
  */
 function validateTwilioSignature(req) {
   const twilioSignature = req.headers['x-twilio-signature'];
-  const authToken = process.env.TWILIO_AUTH_TOKEN;
+  const authToken = process.env.TWILIO_SMS_AUTH_TOKEN;
   
   if (!authToken || process.env.NODE_ENV === 'development') {
     // Skip validation in development mode
@@ -168,54 +168,21 @@ router.post('/sms', async (req, res) => {
     
     // Generate AI response
     let aiReply = 'Thanks for your message!'; // Default fallback
+    const args = {
+      channel: channel,
+      session: session,
+      message: messageBody,
+      incomingMessage: incomingMessage,
+      communication_type: 'sms',
+      io: io
+    };
     
     // if (aiResponseService.isAIEnabled()) {
       try {
         logger.info(`Generating AI response for message: "${messageBody}"`);
-        aiReply = await aiResponseService.generateResponse(incomingMessage.session_id.toString(), messageBody, 'sms');
-        logger.info(`AI response generated: "${aiReply}"`);
-        
-        // Store AI response in database
-        const aiMessage = new Message({
-          channel_id: channel._id.toString(),
-          session_id: session._id.toString(),
-          content: aiReply,
-          sender: 'contact', // AI responds as contact
-          type: 'text',
-          communication_type: 'sms',
-          status: 'sent',
-          metadata: {
-            inResponseTo: messageSid,
-            fromNumber: toNumber,
-            toNumber: fromNumber,
-            generatedBy: 'AI'
-          }
-        });
-        
-        await aiMessage.save();
-        logger.info(`AI response saved: ${aiMessage._id}`);
-        
-        // Update session
-        await Session.findByIdAndUpdate(session._id, {
-          $inc: { message_count: 1 },
-          last_message_at: new Date()
-        });
-        
-        // Broadcast AI response to UI
-        if (io) {
-          io.to(channel._id.toString()).emit('new_message', {
-            id: aiMessage._id.toString(),
-            channel_id: aiMessage.channel_id,
-            session_id: aiMessage.session_id,
-            content: aiMessage.content,
-            sender: aiMessage.sender,
-            type: aiMessage.type,
-            communication_type: aiMessage.communication_type,
-            status: aiMessage.status,
-            created_at: aiMessage.createdAt.toISOString()
-          });
-          logger.info('AI response broadcast to UI');
-        }
+        await aiResponseService.generateAndSaveAIResponse(channel, session, messageBody, 'sms', io, args);
+        logger.info(`AI response generated and sent via Twilio`);
+        // Note: generateAndSaveAIResponse already handles message creation, saving, and broadcasting
         
       } catch (aiError) {
         logger.error('Error generating AI response:', aiError);
@@ -223,12 +190,10 @@ router.post('/sms', async (req, res) => {
       }
     // }
     
-    // Respond with TwiML containing AI-generated reply
+    // Respond with empty TwiML since AI response is sent directly via Twilio
     res.type('text/xml');
     res.send(`<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Message>${aiReply}</Message>
-</Response>`);
+<Response></Response>`);
     
   } catch (error) {
     logger.error('Error processing SMS webhook:', error);
@@ -238,7 +203,27 @@ router.post('/sms', async (req, res) => {
 
 /**
  * Webhook endpoint for incoming WhatsApp messages
- * Twilio will POST to this URL when someone sends a WhatsApp message
+ * 
+ * Twilio will POST to this URL when someone sends a WhatsApp message to your
+ * WhatsApp Business number or sandbox number.
+ * 
+ * Webhook Configuration:
+ * 1. Go to Twilio Console → Messaging → Try It Out → WhatsApp Sandbox
+ * 2. Set "When a message comes in" to: https://<your-domain>/api/webhooks/whatsapp
+ * 3. For production, use your verified WhatsApp Business number webhook URL
+ * 
+ * Expected POST data from Twilio:
+ * - From: whatsapp:+1234567890 (sender's WhatsApp number)
+ * - To: whatsapp:+14155238886 (your WhatsApp number)
+ * - Body: Message content
+ * - MessageSid: Unique message identifier
+ * - NumMedia: Number of media attachments
+ * 
+ * @example
+ * // Test webhook with curl
+ * curl -X POST https://your-domain.com/api/webhooks/whatsapp \
+ *   -H "Content-Type: application/x-www-form-urlencoded" \
+ *   -d "From=whatsapp:+1234567890&To=whatsapp:+14155238886&Body=Hello&MessageSid=SM123"
  */
 router.post('/whatsapp', async (req, res) => {
   try {
@@ -269,12 +254,30 @@ router.post('/whatsapp', async (req, res) => {
     logger.info(`WhatsApp received from ${cleanFromNumber} to ${cleanToNumber}: ${messageBody}`);
     
     // Find the channel for this Twilio number
-    const channel = await Channel.findOne({ phone_number: cleanToNumber });
+    let channel = await Channel.findOne({ phone_number: cleanToNumber });
     
     if (!channel) {
-      logger.warn(`No channel found for Twilio number: ${cleanToNumber}`);
-      res.type('text/xml');
-      return res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+      logger.warn(`No channel found for Twilio number: ${cleanToNumber}, creating new channel`);
+      
+      // Create a new channel for this Twilio number
+      const newChannel = new Channel({
+        name: `Auto-created channel for ${cleanToNumber}`,
+        phone_number: cleanToNumber,
+        country_code: cleanToNumber.startsWith('+1') ? 'US' : 'Unknown',
+        type: 'whatsapp',
+        status: 'active',
+        twilio_sid: null
+      });
+      
+      try {
+        await newChannel.save();
+        logger.info(`New channel created with ID: ${newChannel._id} for phone number: ${cleanToNumber}`);
+        channel = newChannel; // Use the newly created channel
+      } catch (error) {
+        logger.error(`Failed to create new channel for ${cleanToNumber}:`, error);
+        res.type('text/xml');
+        return res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+      }
     }
     
     // Find or create session based on phone number and time gap
@@ -365,54 +368,22 @@ router.post('/whatsapp', async (req, res) => {
     
     // Generate AI response
     let aiReply = 'Thanks for your WhatsApp message!'; // Default fallback
+    const args = {
+      channel: channel,
+      session: session,
+      message: messageBody,
+      incomingMessage: incomingMessage,
+      communication_type: 'whatsapp',
+      io: io
+    };
     
     // if (aiResponseService.isAIEnabled()) {
       try {
         logger.info(`Generating AI response for WhatsApp message: "${messageBody}"`);
-        aiReply = await aiResponseService.generateResponse(incomingMessage.session_id.toString(), messageBody, 'whatsapp');
-        logger.info(`AI response generated: "${aiReply}"`);
-        
-        // Store AI response in database
-        const aiMessage = new Message({
-          channel_id: channel._id.toString(),
-          session_id: session._id.toString(),
-          content: aiReply,
-          sender: 'contact', // AI responds as contact
-          type: 'text',
-          communication_type: 'whatsapp',
-          status: 'sent',
-          metadata: {
-            inResponseTo: messageSid,
-            fromNumber: cleanToNumber,
-            toNumber: cleanFromNumber,
-            generatedBy: 'AI'
-          }
-        });
-        
-        await aiMessage.save();
-        logger.info(`AI WhatsApp response saved: ${aiMessage._id}`);
-        
-        // Update session
-        await Session.findByIdAndUpdate(session._id, {
-          $inc: { message_count: 1 },
-          last_message_at: new Date()
-        });
-        
-        // Broadcast AI response to UI
-        if (io) {
-          io.to(channel._id.toString()).emit('new_message', {
-            id: aiMessage._id.toString(),
-            channel_id: aiMessage.channel_id,
-            session_id: aiMessage.session_id,
-            content: aiMessage.content,
-            sender: aiMessage.sender,
-            type: aiMessage.type,
-            communication_type: aiMessage.communication_type,
-            status: aiMessage.status,
-            created_at: aiMessage.createdAt.toISOString()
-          });
-          logger.info('AI WhatsApp response broadcast to UI');
-        }
+        await aiResponseService.generateAndSaveAIResponse(channel, session, messageBody, 'whatsapp', io, args);
+        logger.info(`AI response generated and sent via Twilio`);
+        // Note: generateAndSaveAIResponse already handles message creation, saving, and broadcasting
+        // No need to return TwiML response since message is sent directly via Twilio
         
       } catch (aiError) {
         logger.error('Error generating AI WhatsApp response:', aiError);
@@ -420,12 +391,10 @@ router.post('/whatsapp', async (req, res) => {
       }
     // }
     
-    // Respond with TwiML containing AI-generated reply
+    // Respond with empty TwiML since AI response is sent directly via Twilio
     res.type('text/xml');
     res.send(`<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Message>${aiReply}</Message>
-</Response>`);
+<Response></Response>`);
     
   } catch (error) {
     logger.error('Error processing WhatsApp webhook:', error);
@@ -581,6 +550,192 @@ router.post('/status', async (req, res) => {
 });
 
 /**
+ * Test endpoint for sending WhatsApp messages
+ * This endpoint allows testing WhatsApp functionality without going through the full channel system
+ * 
+ * POST /api/webhooks/test/whatsapp
+ * Body: { "to": "+1234567890", "message": "Test message" }
+ * 
+ * @example
+ * curl -X POST http://localhost:3000/api/webhooks/test/whatsapp \
+ *   -H "Content-Type: application/json" \
+ *   -d '{"to": "+1234567890", "message": "Hello from WhatsApp test!"}'
+ */
+router.post('/test/whatsapp', async (req, res) => {
+  try {
+    const { to, message } = req.body;
+    
+    if (!to || !message) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: to and message are required'
+      });
+    }
+    
+    // Validate phone number format
+    const phoneRegex = /^\+[1-9]\d{1,14}$/;
+    if (!phoneRegex.test(to)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid phone number format. Use international format (e.g., +1234567890)'
+      });
+    }
+    
+    logger.info(`Testing WhatsApp message to ${to}: ${message}`);
+    
+    // Import Twilio service
+    const twilioService = require('../services/twilioService');
+    
+    // Send WhatsApp message
+    const result = await twilioService.sendWhatsApp(to, message);
+    
+    logger.info(`WhatsApp test message sent successfully: ${result.sid}`);
+    
+    res.json({
+      success: true,
+      message: 'WhatsApp message sent successfully',
+      data: {
+        sid: result.sid,
+        to: result.to,
+        from: result.from,
+        status: result.status,
+        isMock: result.isMock,
+        dateCreated: result.dateCreated
+      }
+    });
+    
+  } catch (error) {
+    logger.error('Error in WhatsApp test endpoint:', error);
+    
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to send WhatsApp message',
+      details: error.code ? `Twilio error code: ${error.code}` : undefined
+    });
+  }
+});
+
+/**
+ * WhatsApp status check endpoint
+ * 
+ * GET /api/webhooks/whatsapp/status
+ * 
+ * Checks if WhatsApp service is online and properly configured
+ * 
+ * @example
+ * curl -X GET http://localhost:3000/api/webhooks/whatsapp/status
+ */
+router.get('/whatsapp/status', async (req, res) => {
+  try {
+    const twilioService = require('../services/twilioService');
+    const messagingService = require('../services/messaging/messagingService');
+    
+    // Check if Twilio client is initialized
+    const isTwilioConfigured = twilioService.client !== null;
+    
+    // Check environment variables
+    const hasWhatsAppNumber = !!process.env.TWILIO_WHATSAPP_NUMBER;
+    const hasAccountSid = !!process.env.TWILIO_ACCOUNT_SID;
+    const hasAuthToken = !!process.env.TWILIO_SMS_AUTH_TOKEN;
+    
+    // Check if WhatsApp number is properly formatted
+    const whatsappNumber = process.env.TWILIO_WHATSAPP_NUMBER;
+    const isWhatsAppNumberValid = whatsappNumber && whatsappNumber.startsWith('whatsapp:');
+    
+    // Test Twilio connection by attempting to get account info
+    let twilioConnectionStatus = 'unknown';
+    let twilioAccountInfo = null;
+    
+    if (isTwilioConfigured) {
+      try {
+        // Try to get account information to test connection
+        const account = await twilioService.client.api.accounts(twilioService.accountSid).fetch();
+        twilioConnectionStatus = 'connected';
+        twilioAccountInfo = {
+          friendlyName: account.friendlyName,
+          status: account.status,
+          type: account.type
+        };
+      } catch (error) {
+        twilioConnectionStatus = 'error';
+        logger.error('Twilio connection test failed:', error.message);
+      }
+    }
+    
+    // Overall status
+    const isOnline = isTwilioConfigured && 
+                    hasWhatsAppNumber && 
+                    hasAccountSid && 
+                    hasAuthToken && 
+                    isWhatsAppNumberValid && 
+                    twilioConnectionStatus === 'connected';
+    
+    const status = {
+      online: isOnline,
+      timestamp: new Date().toISOString(),
+      services: {
+        twilio: {
+          configured: isTwilioConfigured,
+          connection: twilioConnectionStatus,
+          account: twilioAccountInfo
+        },
+        environment: {
+          TWILIO_WHATSAPP_NUMBER: hasWhatsAppNumber ? 'configured' : 'missing',
+          TWILIO_ACCOUNT_SID: hasAccountSid ? 'configured' : 'missing',
+          TWILIO_SMS_AUTH_TOKEN: hasAuthToken ? 'configured' : 'missing',
+          whatsappNumberFormat: isWhatsAppNumberValid ? 'valid' : 'invalid'
+        },
+        messaging: {
+          service: 'available',
+          mockMode: process.env.MOCK_MODE === 'true'
+        }
+      },
+      recommendations: []
+    };
+    
+    // Add recommendations based on status
+    if (!hasWhatsAppNumber) {
+      status.recommendations.push('Set TWILIO_WHATSAPP_NUMBER environment variable');
+    }
+    
+    if (!isWhatsAppNumberValid && hasWhatsAppNumber) {
+      status.recommendations.push('TWILIO_WHATSAPP_NUMBER should start with "whatsapp:" (e.g., whatsapp:+14155238886)');
+    }
+    
+    if (!hasAccountSid) {
+      status.recommendations.push('Set TWILIO_ACCOUNT_SID environment variable');
+    }
+    
+    if (!hasAuthToken) {
+      status.recommendations.push('Set TWILIO_SMS_AUTH_TOKEN environment variable');
+    }
+    
+    if (twilioConnectionStatus === 'error') {
+      status.recommendations.push('Check Twilio credentials and network connection');
+    }
+    
+    if (process.env.MOCK_MODE === 'true') {
+      status.recommendations.push('WhatsApp is running in mock mode - set MOCK_MODE=false for real Twilio integration');
+    }
+    
+    // Set appropriate HTTP status
+    const httpStatus = isOnline ? 200 : 503;
+    
+    res.status(httpStatus).json(status);
+    
+  } catch (error) {
+    logger.error('Error checking WhatsApp status:', error);
+    
+    res.status(500).json({
+      online: false,
+      timestamp: new Date().toISOString(),
+      error: 'Failed to check WhatsApp status',
+      details: error.message
+    });
+  }
+});
+
+/**
  * Health check endpoint for webhooks
  */
 router.get('/health', (req, res) => {
@@ -591,7 +746,9 @@ router.get('/health', (req, res) => {
       sms: '/api/webhooks/sms',
       whatsapp: '/api/webhooks/whatsapp',
       voice: '/api/webhooks/voice',
-      status: '/api/webhooks/status'
+      status: '/api/webhooks/status',
+      test_whatsapp: '/api/webhooks/test/whatsapp',
+      whatsapp_status: '/api/webhooks/whatsapp/status'
     }
   });
 });

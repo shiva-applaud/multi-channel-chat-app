@@ -3,20 +3,93 @@ const logger = require('../utils/logger');
 class TwilioService {
   constructor() {
     this.accountSid = process.env.TWILIO_ACCOUNT_SID;
-    this.authToken = process.env.TWILIO_AUTH_TOKEN;
-    this.client = null;
+    this.smsAuthToken = process.env.TWILIO_SMS_AUTH_TOKEN;
+    this.whatsappAuthToken = process.env.TWILIO_WHATSAPP_AUTH_TOKEN;
+    this.smsClient = null;
+    this.whatsappClient = null;
+    this.smsConfigured = false;
+    this.whatsappConfigured = false;
     
-    if (this.accountSid && this.authToken && this.accountSid !== 'your_account_sid_here') {
+    // Initialize SMS client
+    if (this.accountSid && this.smsAuthToken && this.accountSid !== 'your_account_sid_here') {
       try {
         const twilio = require('twilio');
-        this.client = twilio(this.accountSid, this.authToken);
-        logger.info('Twilio client initialized successfully');
+        this.smsClient = twilio(this.accountSid, this.smsAuthToken);
+        this.smsConfigured = true;
+        logger.info('Twilio SMS client initialized successfully');
       } catch (error) {
-        logger.error('Failed to initialize Twilio client:', error);
+        logger.error('Failed to initialize Twilio SMS client:', error);
+        this.smsConfigured = false;
       }
-    } else {
-      logger.warn('Twilio credentials not configured. Phone number generation will use mock data.');
     }
+    
+    // Initialize WhatsApp client
+    if (this.accountSid && this.whatsappAuthToken && this.accountSid !== 'your_account_sid_here') {
+      try {
+        const twilio = require('twilio');
+        this.whatsappClient = twilio(this.accountSid, this.whatsappAuthToken);
+        this.whatsappConfigured = true;
+        logger.info('Twilio WhatsApp client initialized successfully');
+      } catch (error) {
+        logger.error('Failed to initialize Twilio WhatsApp client:', error);
+        this.whatsappConfigured = false;
+      }
+    }
+    
+    if (!this.smsConfigured && !this.whatsappConfigured) {
+      logger.warn('Twilio credentials not configured. All messaging will use mock mode.');
+      logger.warn('To enable real Twilio messaging, set:');
+      logger.warn('  - TWILIO_ACCOUNT_SID');
+      logger.warn('  - TWILIO_SMS_AUTH_TOKEN (for SMS)');
+      logger.warn('  - TWILIO_WHATSAPP_AUTH_TOKEN (for WhatsApp)');
+      logger.warn('  - TWILIO_WHATSAPP_NUMBER (for WhatsApp)');
+      logger.warn('  - TWILIO_PHONE_NUMBER (for SMS)');
+    }
+  }
+
+  /**
+   * Check if Twilio SMS is properly configured
+   * @returns {boolean} - True if SMS client is configured and ready
+   */
+  isSmsConfigured() {
+    return this.smsConfigured && this.smsClient !== null;
+  }
+
+  /**
+   * Check if Twilio WhatsApp is properly configured
+   * @returns {boolean} - True if WhatsApp client is configured and ready
+   */
+  isWhatsAppConfigured() {
+    return this.whatsappConfigured && this.whatsappClient !== null;
+  }
+
+  /**
+   * Check if any Twilio service is configured
+   * @returns {boolean} - True if at least one service is configured
+   */
+  isTwilioConfigured() {
+    return this.isSmsConfigured() || this.isWhatsAppConfigured();
+  }
+
+  /**
+   * Get configuration status
+   * @returns {Object} - Configuration status details
+   */
+  getConfigurationStatus() {
+    return {
+      isSmsConfigured: this.smsConfigured,
+      isWhatsAppConfigured: this.whatsappConfigured,
+      hasSmsClient: this.smsClient !== null,
+      hasWhatsAppClient: this.whatsappClient !== null,
+      hasAccountSid: !!this.accountSid,
+      hasSmsAuthToken: !!this.smsAuthToken,
+      hasWhatsAppAuthToken: !!this.whatsappAuthToken,
+      hasWhatsAppNumber: !!process.env.TWILIO_WHATSAPP_NUMBER,
+      hasPhoneNumber: !!process.env.TWILIO_PHONE_NUMBER,
+      accountSid: this.accountSid ? `${this.accountSid.substring(0, 8)}...` : 'Not set',
+      whatsappNumber: process.env.TWILIO_WHATSAPP_NUMBER || 'Not set',
+      phoneNumber: process.env.TWILIO_PHONE_NUMBER || 'Not set'
+    };
   }
 
   /**
@@ -237,8 +310,9 @@ class TwilioService {
    */
   async sendSMS(to, message, from = null) {
     try {
-      if (!this.client) {
-        logger.warn('Twilio not configured. Simulating SMS send.');
+      if (!this.isSmsConfigured()) {
+        logger.warn('Twilio SMS not configured. Simulating SMS send.');
+        logger.warn('Configuration status:', this.getConfigurationStatus());
         return {
           sid: `SM${Date.now()}`,
           to,
@@ -257,7 +331,7 @@ class TwilioService {
 
       logger.info(`Sending SMS from ${fromNumber} to ${to}`);
 
-      const twilioMessage = await this.client.messages.create({
+      const twilioMessage = await this.smsClient.messages.create({
         body: message,
         from: fromNumber,
         to: to
@@ -282,29 +356,45 @@ class TwilioService {
 
   /**
    * Send a WhatsApp message via Twilio
+   * 
+   * This method handles both Twilio Sandbox and production WhatsApp messaging.
+   * For sandbox mode, use the Twilio Sandbox number: whatsapp:+14155238886
+   * For production, use your verified WhatsApp Business number.
+   * 
    * @param {string} to - Recipient phone number with country code (e.g., "+1234567890")
    * @param {string} message - Message content
-   * @param {string} from - Sender phone number (defaults to TWILIO_PHONE_NUMBER)
-   * @returns {Promise<Object>} - Message details
+   * @param {string} from - Sender phone number (defaults to TWILIO_WHATSAPP_NUMBER or TWILIO_PHONE_NUMBER)
+   * @returns {Promise<Object>} - Message details with SID, status, and delivery info
+   * 
+   * @example
+   * // Send WhatsApp message using sandbox
+   * const result = await twilioService.sendWhatsApp('+1234567890', 'Hello from WhatsApp!');
+   * console.log('Message SID:', result.sid);
+   * 
+   * @example
+   * // Send WhatsApp message with custom from number
+   * const result = await twilioService.sendWhatsApp('+1234567890', 'Hello!', '+14155238886');
    */
   async sendWhatsApp(to, message, from = null) {
     try {
-      if (!this.client) {
-        logger.warn('Twilio not configured. Simulating WhatsApp send.');
+      if (!this.isWhatsAppConfigured()) {
+        logger.warn('Twilio WhatsApp not configured. Simulating WhatsApp send.');
+        logger.warn('Configuration status:', this.getConfigurationStatus());
         return {
           sid: `WA${Date.now()}`,
           to: `whatsapp:${to}`,
-          from: `whatsapp:${from || process.env.TWILIO_PHONE_NUMBER || '+15703251809'}`,
+          from: `whatsapp:${from || process.env.TWILIO_WHATSAPP_NUMBER || process.env.TWILIO_PHONE_NUMBER || '+14155238886'}`,
           body: message,
           status: 'queued',
           isMock: true
         };
       }
 
-      const fromNumber = from || process.env.TWILIO_PHONE_NUMBER;
+      // Use WhatsApp-specific number if available, otherwise fall back to regular phone number
+      const fromNumber = from || process.env.TWILIO_WHATSAPP_NUMBER || process.env.TWILIO_PHONE_NUMBER;
       
       if (!fromNumber) {
-        throw new Error('No sender phone number configured');
+        throw new Error('No WhatsApp sender number configured. Set TWILIO_WHATSAPP_NUMBER or TWILIO_PHONE_NUMBER');
       }
 
       // WhatsApp numbers must be prefixed with "whatsapp:"
@@ -313,7 +403,7 @@ class TwilioService {
 
       logger.info(`Sending WhatsApp message from ${whatsappFrom} to ${whatsappTo}`);
 
-      const twilioMessage = await this.client.messages.create({
+      const twilioMessage = await this.whatsappClient.messages.create({
         body: message,
         from: whatsappFrom,
         to: whatsappTo
@@ -332,6 +422,19 @@ class TwilioService {
       };
     } catch (error) {
       logger.error('Error sending WhatsApp message:', error);
+      
+      // Enhanced error handling for common WhatsApp issues
+      if (error.code === 21211) {
+        logger.error('WhatsApp: Invalid phone number format. Ensure number includes country code (e.g., +1234567890)');
+        throw new Error('Invalid phone number format. Please include country code.');
+      } else if (error.code === 63016) {
+        logger.error('WhatsApp: Message not delivered. Recipient may not be in WhatsApp sandbox.');
+        throw new Error('Message not delivered. Recipient must join the WhatsApp sandbox first.');
+      } else if (error.code === 63007) {
+        logger.error('WhatsApp: Message not delivered. Invalid WhatsApp number.');
+        throw new Error('Invalid WhatsApp number. Please check the recipient number.');
+      }
+      
       throw error;
     }
   }

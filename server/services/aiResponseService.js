@@ -1,5 +1,9 @@
 const logger = require('../utils/logger');
 const axios = require('axios');
+const Message = require('../models/Message');
+const Session = require('../models/Session');
+const Channel = require('../models/Channel');
+const twilioService = require('./twilioService');
 
 /**
  * AI Response Service
@@ -173,15 +177,27 @@ class AIResponseService {
       });
 
       logger.info(`External chat API response received for session: ${sessionId}`);
-      logger.info(`Response: ${JSON.stringify(response)}`);
-      return response.data;
+      logger.info(`Response: ${JSON.stringify(response.data)}`);
+      
+      // Extract the actual content from the API response
+      if (response.data && response.data.content) {
+        return response.data.content;
+      } else if (response.data && response.data.message) {
+        return response.data.message;
+      } else if (response.data && typeof response.data === 'string') {
+        return response.data;
+      } else {
+        logger.warn('No valid content found in API response, using fallback');
+        return this.generateMockResponse(message, communicationType);
+      }
     } catch (error) {
       logger.error(`Error calling external chat API: ${error.message}`);
       if (error.response) {
         logger.error(`API responded with status: ${error.response.status}`);
         logger.error(`API error data: ${JSON.stringify(error.response.data)}`);
       }
-      throw error;
+      return this.generateMockResponse(message, communicationType);
+      // throw error;
     }
   }
 
@@ -220,6 +236,191 @@ class AIResponseService {
   disable() {
     this.isEnabled = false;
     logger.info('AI responses disabled');
+  }
+
+  /**
+   * Generate and save AI response asynchronously
+   * This function handles the complete flow of generating AI responses,
+   * saving them to the database, and sending them via Twilio
+   * 
+   * @param {string|Object} channel_id - Channel ID or Channel object
+   * @param {string|Object} session_id - Session ID or Session object
+   * @param {string} userMessageContent - User's message content
+   * @param {string} communication_type - Communication type (sms, whatsapp, etc.)
+   * @param {Object} io - Socket.IO instance for real-time updates
+   * @param {Object} args - Additional arguments
+   */
+  async generateAndSaveAIResponse(channel_id, session_id, userMessageContent, communication_type, io, args) {
+    try {
+      logger.info('Generating AI response...');
+      
+      // Generate AI response
+      const aiContent = await this.generateResponse(session_id, userMessageContent, communication_type);
+      logger.info(`AI content: ${aiContent}`);
+      if (!aiContent || aiContent === 'undefined' || aiContent.trim() === '') {
+        logger.info('AI responses disabled or no valid response generated');
+        return;
+      }
+      
+      // Handle channel - can be object or ID string
+      let channel;
+      let channelId;
+      if (typeof channel_id === 'object' && channel_id._id) {
+        // Channel object passed
+        channel = channel_id;
+        channelId = channel._id.toString();
+      } else {
+        // Channel ID string passed
+        channelId = channel_id;
+        if (args.channel) {
+          channel = args.channel;
+        } else {
+          channel = await Channel.findById(channel_id);
+          if (!channel) {
+            logger.warn(`Channel not found for AI response, creating new channel for ID: ${channel_id}`);
+            
+            // Create a new channel with the given channel_id
+            const newChannel = new Channel({
+              _id: channel_id, // Use the given channel_id as the document _id
+              name: `Auto-created channel for ${channel_id}`,
+              phone_number: `+${channel_id}`, // Use channel_id as phone number
+              country_code: 'Unknown',
+              type: 'whatsapp',
+              status: 'active',
+              twilio_sid: null
+            });
+            
+            try {
+              await newChannel.save();
+              logger.info(`New channel created with ID: ${newChannel._id} for channel_id: ${channel_id}`);
+              channel = newChannel; // Use the newly created channel
+            } catch (error) {
+              logger.error(`Failed to create new channel for ${channel_id}:`, error);
+              return;
+            }
+          }
+        }
+      }
+      
+      // Handle session - can be object or ID string
+      let sessionId;
+      if (typeof session_id === 'object' && session_id._id) {
+        // Session object passed
+        sessionId = session_id._id.toString();
+      } else {
+        // Session ID string passed
+        sessionId = session_id;
+        if (args.session) {
+          session = args.session;
+        } else {
+          session = await Session.findById(session_id);
+          if (!session) {
+            logger.warn(`Session not found for AI response, creating new session for ID: ${session_id}`);
+          }
+        }
+      }
+      
+      // Get user's phone number from the most recent user message in this session
+      let userPhoneNumber;
+      if (args.incomingMessage) {
+        userPhoneNumber = args.incomingMessage.metadata.fromNumber;
+      } else {
+        const recentUserMessage = await Message.findOne({
+          session_id: sessionId,
+          sender: 'user'
+        }).sort({ createdAt: -1 });
+        logger.info(`Recent user message: ${JSON.stringify(recentUserMessage)}`);
+        userPhoneNumber = recentUserMessage?.metadata?.fromNumber;
+      }
+      
+      // Save AI message to MongoDB
+      const aiMessage = new Message({
+        channel_id: channelId,
+        session_id: sessionId,
+        content: aiContent,
+        sender: 'contact', // AI responds as 'contact'
+        type: 'text',
+        communication_type: communication_type || 'whatsapp', // Default to 'whatsapp' instead of null
+        status: 'sent'
+      });
+      
+      await aiMessage.save();
+      logger.info(`AI message saved to DB: ${aiMessage._id} in session ${session_id}`);
+      
+      // Send AI response via Twilio FROM Twilio number TO user's number
+      if (userPhoneNumber && channel.phone_number) {
+        try {
+          if (communication_type === 'sms') {
+            logger.info(`📤 Sending AI SMS FROM ${channel.phone_number} TO ${userPhoneNumber}`);
+            const result = await twilioService.sendSMS(
+              userPhoneNumber,        // TO: User's number
+              aiContent,              // AI response content
+              channel.phone_number    // FROM: Twilio number
+            );
+            logger.info(`✅ AI SMS sent via Twilio: ${result.sid || (result.isMock ? 'mock' : 'unknown')}`);
+          } 
+          else if (communication_type === 'whatsapp') {
+            logger.info(`📤 Sending AI WhatsApp FROM ${channel.phone_number} TO ${userPhoneNumber}`);
+            const result = await twilioService.sendWhatsApp(
+              userPhoneNumber,        // TO: User's number
+              aiContent,
+              channel.phone_number    // FROM: Twilio number
+            );
+            logger.info(`✅ AI WhatsApp sent via Twilio: ${result.sid || (result.isMock ? 'mock' : 'unknown')}`);
+          }
+          
+          // Store metadata
+          aiMessage.metadata = {
+            fromNumber: channel.phone_number,
+            toNumber: userPhoneNumber,
+            sentViaTwitter: true,
+            direction: 'outgoing'
+          };
+          await aiMessage.save();
+          
+        } catch (twilioError) {
+          logger.error(`❌ Failed to send AI response via Twilio:`, twilioError);
+          
+          // Check if it's an authentication error
+          if (twilioError.message === 'Authenticate' || twilioError.message.includes('Authentication')) {
+            logger.error('🔐 Twilio authentication failed. Please check your credentials:');
+            logger.error('   - TWILIO_ACCOUNT_SID');
+            logger.error('   - TWILIO_SMS_AUTH_TOKEN');
+            logger.error('   - TWILIO_WHATSAPP_NUMBER (for WhatsApp)');
+            logger.error('   - TWILIO_PHONE_NUMBER (for SMS)');
+          }
+          
+          // Continue - message is already saved in DB
+        }
+      } else {
+        logger.warn('Cannot send AI response via Twilio: missing user phone number or Twilio number');
+      }
+      
+      // Update session
+      await Session.findByIdAndUpdate(sessionId, {
+        $inc: { message_count: 1 },
+        last_message_at: new Date()
+      });
+      
+      // Transform AI message for frontend
+      const aiMessageResponse = {
+        id: aiMessage._id.toString(),
+        channel_id: aiMessage.channel_id,
+        session_id: aiMessage.session_id,
+        content: aiMessage.content,
+        sender: aiMessage.sender,
+        type: aiMessage.type,
+        communication_type: aiMessage.communication_type,
+        status: aiMessage.status,
+        created_at: aiMessage.createdAt.toISOString()
+      };
+      
+      // Emit AI message to connected clients
+      io.to(channel_id).emit('new_message', aiMessageResponse);
+      logger.info('AI response sent to clients via Socket.IO');
+    } catch (error) {
+      logger.error('Error in generateAndSaveAIResponse:', error);
+    }
   }
 }
 
