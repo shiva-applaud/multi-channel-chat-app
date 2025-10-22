@@ -164,7 +164,7 @@ router.post('/', async (req, res) => {
     // Step 2: Generate and save AI response (if enabled and sender is user)
     if (sender === 'user' && aiResponseService.isAIEnabled()) {
       // Don't await - let AI response happen asynchronously
-      generateAndSaveAIResponse(channel_id, session_id, content, communication_type, io).catch(err => {
+      aiResponseService.generateAndSaveAIResponse(channel_id, session_id, content, communication_type, io).catch(err => {
         logger.error('Error generating AI response:', err);
       });
     }
@@ -177,116 +177,6 @@ router.post('/', async (req, res) => {
   }
 });
 
-/**
- * Generate and save AI response asynchronously
- */
-async function generateAndSaveAIResponse(channel_id, session_id, userMessageContent, communication_type, io) {
-  try {
-    logger.info('Generating AI response...');
-    
-    // Generate AI response
-    const aiContent = await aiResponseService.generateResponse(session_id, userMessageContent, communication_type);
-    
-    if (!aiContent) {
-      logger.info('AI responses disabled or no response generated');
-      return;
-    }
-    
-    // Get channel details for Twilio number
-    const channel = await Channel.findById(channel_id);
-    if (!channel) {
-      logger.error('Channel not found for AI response');
-      return;
-    }
-    
-    // Get user's phone number from the most recent user message in this session
-    const recentUserMessage = await Message.findOne({
-      session_id,
-      sender: 'user',
-      'metadata.fromNumber': { $exists: true }
-    }).sort({ createdAt: -1 });
-    
-    const userPhoneNumber = recentUserMessage?.metadata?.fromNumber;
-    
-    // Save AI message to MongoDB
-    const aiMessage = new Message({
-      channel_id,
-      session_id,
-      content: aiContent,
-      sender: 'contact', // AI responds as 'contact'
-      type: 'text',
-      communication_type: communication_type || null,
-      status: 'sent'
-    });
-    
-    await aiMessage.save();
-    logger.info(`AI message saved to DB: ${aiMessage._id} in session ${session_id}`);
-    
-    // Send AI response via Twilio FROM Twilio number TO user's number
-    if (userPhoneNumber && channel.phone_number) {
-      try {
-        if (communication_type === 'sms') {
-          logger.info(`📤 Sending AI SMS FROM ${channel.phone_number} TO ${userPhoneNumber}`);
-          const result = await twilioService.sendSMS(
-            userPhoneNumber,        // TO: User's number
-            aiContent,              // AI response content
-            channel.phone_number    // FROM: Twilio number
-          );
-          logger.info(`✅ AI SMS sent via Twilio: ${result.sid || (result.isMock ? 'mock' : 'unknown')}`);
-        } 
-        else if (communication_type === 'whatsapp') {
-          logger.info(`📤 Sending AI WhatsApp FROM ${channel.phone_number} TO ${userPhoneNumber}`);
-          const result = await twilioService.sendWhatsApp(
-            userPhoneNumber,        // TO: User's number
-            aiContent,
-            channel.phone_number    // FROM: Twilio number
-          );
-          logger.info(`✅ AI WhatsApp sent via Twilio: ${result.sid || (result.isMock ? 'mock' : 'unknown')}`);
-        }
-        
-        // Store metadata
-        aiMessage.metadata = {
-          fromNumber: channel.phone_number,
-          toNumber: userPhoneNumber,
-          sentViaTwitter: true,
-          direction: 'outgoing'
-        };
-        await aiMessage.save();
-        
-      } catch (twilioError) {
-        logger.error(`❌ Failed to send AI response via Twilio:`, twilioError);
-        // Continue - message is already saved in DB
-      }
-    } else {
-      logger.warn('Cannot send AI response via Twilio: missing user phone number or Twilio number');
-    }
-    
-    // Update session
-    await Session.findByIdAndUpdate(session_id, {
-      $inc: { message_count: 1 },
-      last_message_at: new Date()
-    });
-    
-    // Transform AI message for frontend
-    const aiMessageResponse = {
-      id: aiMessage._id.toString(),
-      channel_id: aiMessage.channel_id,
-      session_id: aiMessage.session_id,
-      content: aiMessage.content,
-      sender: aiMessage.sender,
-      type: aiMessage.type,
-      communication_type: aiMessage.communication_type,
-      status: aiMessage.status,
-      created_at: aiMessage.createdAt.toISOString()
-    };
-    
-    // Emit AI message to connected clients
-    io.to(channel_id).emit('new_message', aiMessageResponse);
-    logger.info('AI response sent to clients via Socket.IO');
-  } catch (error) {
-    logger.error('Error in generateAndSaveAIResponse:', error);
-  }
-}
 
 // Get single message
 router.get('/:id', async (req, res) => {

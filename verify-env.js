@@ -45,7 +45,7 @@ async function verifyTwilioConnection() {
     log('\n🔍 Testing Twilio Connection...', 'cyan');
     
     const accountSid = process.env.TWILIO_ACCOUNT_SID;
-    const authToken = process.env.TWILIO_AUTH_TOKEN;
+    const authToken = process.env.TWILIO_SMS_AUTH_TOKEN;
     
     if (!accountSid || !authToken) {
       log('❌ Cannot test Twilio: Missing credentials', 'red');
@@ -105,7 +105,7 @@ async function main() {
   // Twilio Configuration
   log('\n📱 Twilio Configuration:', 'cyan');
   const hasAccountSid = checkEnvVar('TWILIO_ACCOUNT_SID', true);
-  const hasAuthToken = checkEnvVar('TWILIO_AUTH_TOKEN', true);
+  const hasAuthToken = checkEnvVar('TWILIO_SMS_AUTH_TOKEN', true);
   const hasPhoneNumber = checkEnvVar('TWILIO_PHONE_NUMBER', true);
   checkEnvVar('TWILIO_USER_SID', false);
   

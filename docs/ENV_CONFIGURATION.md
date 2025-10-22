@@ -29,10 +29,15 @@ MONGODB_URI=mongodb://localhost:27017/multi_channel_chat
 # ============================================
 # Twilio Configuration
 # ============================================
-TWILIO_ACCOUNT_SID=AC4feda09c353acfaeae1756f285d6cad0
-TWILIO_USER_SID=USbd792e93f4d0373b305e5975ca4bc668
-TWILIO_AUTH_TOKEN=7afe4cf18bf0b8c9708badd63fa58e68
+TWILIO_ACCOUNT_SID=
+TWILIO_USER_SID=
+TWILIO_AUTH_TOKEN=
 TWILIO_PHONE_NUMBER=+15703251809
+
+# WhatsApp Configuration
+# For Twilio Sandbox: use whatsapp:+14155238886
+# For production: use your verified WhatsApp Business number
+TWILIO_WHATSAPP_NUMBER=whatsapp:+14155238886
 
 # Production Auth Token (for later use)
 # TWILIO_PRODUCTION_AUTH_TOKEN=3b504efa3ed762607b296b2a468e0874
@@ -128,6 +133,21 @@ constructor() {
     this.client = twilio(this.accountSid, this.authToken);
     // ✅ Twilio client initialized
   }
+}
+```
+
+### **For WhatsApp Messaging:**
+
+```javascript
+async sendWhatsApp(to, message, from = null) {
+  // Uses TWILIO_WHATSAPP_NUMBER for WhatsApp messages
+  const fromNumber = from || process.env.TWILIO_WHATSAPP_NUMBER || process.env.TWILIO_PHONE_NUMBER;
+  
+  const twilioMessage = await this.client.messages.create({
+    body: message,
+    from: `whatsapp:${fromNumber}`,  // WhatsApp prefix required
+    to: `whatsapp:${to}`              // WhatsApp prefix required
+  });
 }
 ```
 
@@ -321,6 +341,44 @@ MOCK_MODE=false  # Change to false
 
 ---
 
+## 📱 **WhatsApp Setup Guide**
+
+### **Step 1: Twilio WhatsApp Sandbox Setup**
+
+1. **Go to Twilio Console:**
+   - Navigate to [Twilio Console → Messaging → Try It Out → WhatsApp Sandbox](https://www.twilio.com/console/sms/whatsapp/sandbox)
+
+2. **Get Your Sandbox Number:**
+   - Your sandbox number is: `+1 415 523 8886`
+   - Sandbox code: `join <your-sandbox-code>`
+
+3. **Configure Webhook:**
+   - Set **"When a message comes in"** to: `https://<your-domain>/api/webhooks/whatsapp`
+   - For local testing with ngrok: `https://abc123.ngrok.io/api/webhooks/whatsapp`
+
+### **Step 2: Test WhatsApp Integration**
+
+```bash
+# Test outbound WhatsApp message
+curl -X POST http://localhost:3000/api/webhooks/test/whatsapp \
+  -H "Content-Type: application/json" \
+  -d '{"to": "+1234567890", "message": "Hello from WhatsApp!"}'
+```
+
+### **Step 3: Join WhatsApp Sandbox**
+
+1. **Send WhatsApp message to:** `+1 415 523 8886`
+2. **Message content:** `join <your-sandbox-code>`
+3. **You'll receive confirmation:** "You are now connected to the sandbox!"
+
+### **Step 4: Test Inbound Messages**
+
+1. Send a WhatsApp message to your sandbox number
+2. Check server logs for webhook processing
+3. Verify AI response is sent back
+
+---
+
 ## ✅ **Checklist**
 
 Before testing, ensure:
@@ -329,11 +387,14 @@ Before testing, ensure:
 - [ ] Twilio Account SID: `AC4feda09c353acfaeae1756f285d6cad0`
 - [ ] Twilio Auth Token: `7afe4cf18bf0b8c9708badd63fa58e68`
 - [ ] Twilio Phone Number: `+15703251809`
+- [ ] **TWILIO_WHATSAPP_NUMBER: `whatsapp:+14155238886`**
 - [ ] `MOCK_MODE=false`
 - [ ] MongoDB URI: `mongodb://localhost:27017/multi_channel_chat`
 - [ ] `AI_RESPONSES_ENABLED=true`
 - [ ] Server restarted
 - [ ] Logs show: "Twilio client initialized successfully"
+- [ ] **WhatsApp sandbox webhook configured**
+- [ ] **Joined WhatsApp sandbox with test number**
 
 ---
 

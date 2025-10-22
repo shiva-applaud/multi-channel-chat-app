@@ -54,8 +54,7 @@ router.post('/test', async (req, res) => {
       return res.status(400).json({ error: 'Message is required' });
     }
     
-    // generateResponse(session_id, userMessage, communicationType)
-    const response = await aiResponseService.generateResponse('test-session', message, communication_type);
+    const response = await aiResponseService.generateAndSaveAIResponse(message, communication_type);
     
     res.json({
       userMessage: message,
