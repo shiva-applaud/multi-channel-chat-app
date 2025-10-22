@@ -157,14 +157,14 @@ class AIResponseService {
    * Call external chat API
    * @param {string} sessionId - The session ID
    * @param {string} message - The incoming message
-   * @returns {Promise<object>} - API response
+   * @returns {Promise<string>} - AI reply text
    */
   async callExternalChatAPI(sessionId, message, communicationType) {
     try {
       logger.info(`Calling external chat API for session: ${sessionId} `);
       logger.info(`Communication type: ${communicationType}`);
       
-      const response = await axios.post('http://localhost:8100/chat', {
+      const response = await axios.post('http://127.0.0.1:8100/chat', {
         actor_id: '123434tdfg423234',
         session_id: sessionId,
         message: message,
@@ -177,19 +177,33 @@ class AIResponseService {
       });
 
       logger.info(`External chat API response received for session: ${sessionId}`);
-      logger.info(`Response: ${JSON.stringify(response.data)}`);
-      
-      // Extract the actual content from the API response
-      if (response.data && response.data.content) {
-        return response.data.content;
-      } else if (response.data && response.data.message) {
-        return response.data.message;
-      } else if (response.data && typeof response.data === 'string') {
-        return response.data;
-      } else {
+      // Avoid circular structure by only logging safe parts
+      try {
+        logger.info(`Response status: ${response.status}`);
+        logger.info(`Response data: ${JSON.stringify(response.data)}`);
+      } catch (logErr) {
+        logger.warn('Failed to serialize external API response for logging');
+      }
+
+      // Normalize to a string reply for downstream consumers
+      const data = response && response.data !== undefined ? response.data : null;
+      let reply = '';
+      if (typeof data === 'string') {
+        reply = data;
+      } else if (data && typeof data.reply === 'string') {
+        reply = data.reply;
+      } else if (data && typeof data.message === 'string') {
+        reply = data.message;
+      } else if (data && typeof data.text === 'string') {
+        reply = data.text;
+      } else if (typeof data !== 'string') {
         logger.warn('No valid content found in API response, using fallback');
         return this.generateMockResponse(message, communicationType);
+      } else {
+        reply = JSON.stringify(data);
       }
+
+      return reply;
     } catch (error) {
       logger.error(`Error calling external chat API: ${error.message}`);
       if (error.response) {
