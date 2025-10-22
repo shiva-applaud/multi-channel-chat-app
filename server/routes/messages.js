@@ -164,7 +164,15 @@ router.post('/', async (req, res) => {
     // Step 2: Generate and save AI response (if enabled and sender is user)
     if (sender === 'user' && aiResponseService.isAIEnabled()) {
       // Don't await - let AI response happen asynchronously
-      aiResponseService.generateAndSaveAIResponse(channel_id, session_id, content, communication_type, io).catch(err => {
+      const args = {
+        channel: channel,
+        session: session,
+        message: content,
+        incomingMessage: userMessage,
+        communication_type: communication_type,
+        io: io
+      };
+      aiResponseService.generateAndSaveAIResponse(channel_id, session_id, content, communication_type, io, args).catch(err => {
         logger.error('Error generating AI response:', err);
       });
     }

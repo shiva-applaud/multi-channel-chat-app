@@ -5,41 +5,34 @@ const Message = require('../models/Message');
 const Session = require('../models/Session');
 const Channel = require('../models/Channel');
 const aiResponseService = require('../services/aiResponseService');
+const messagingProvider = require('../services/twilioService'); // Now returns the active provider
 const crypto = require('crypto');
 
 /**
- * Validate Twilio webhook signature
- * This ensures the request is actually from Twilio
+ * Validate webhook signature from the messaging provider
+ * This ensures the request is actually from the configured provider (Twilio or AWS)
  */
-function validateTwilioSignature(req) {
-  const twilioSignature = req.headers['x-twilio-signature'];
-  const authToken = process.env.TWILIO_SMS_AUTH_TOKEN;
-  
-  if (!authToken || process.env.NODE_ENV === 'development') {
-    // Skip validation in development mode
-    logger.warn('Twilio signature validation skipped (dev mode or no auth token)');
-    return true;
-  }
-  
-  if (!twilioSignature) {
-    logger.error('No Twilio signature found in headers');
-    return false;
-  }
-  
+function validateWebhookSignature(req) {
   try {
-    const twilio = require('twilio');
-    const url = `${process.env.SERVER_URL || 'http://localhost:3000'}${req.originalUrl}`;
-    const isValid = twilio.validateRequest(authToken, twilioSignature, url, req.body);
+    const isValid = messagingProvider.validateWebhookSignature(req);
     
     if (!isValid) {
-      logger.error('Invalid Twilio signature');
+      logger.error(`Invalid webhook signature from provider: ${messagingProvider.getProviderName()}`);
     }
     
     return isValid;
   } catch (error) {
-    logger.error('Error validating Twilio signature:', error);
-    return false;
+    logger.error('Error validating webhook signature:', error);
+    return process.env.NODE_ENV === 'development'; // Allow in development
   }
+}
+
+/**
+ * Legacy function for backward compatibility
+ * @deprecated Use validateWebhookSignature instead
+ */
+function validateTwilioSignature(req) {
+  return validateWebhookSignature(req);
 }
 
 /**
@@ -48,20 +41,24 @@ function validateTwilioSignature(req) {
  */
 router.post('/sms', async (req, res) => {
   try {
+    logger.info('POST /api/webhooks/sms');
+    logger.info(`Provider: ${messagingProvider.getProviderName()}`);
     logger.info('Received SMS webhook:', req.body);
     
-    // Validate the request is from Twilio (commented out for development)
-    // if (!validateTwilioSignature(req)) {
+    // Validate the request is from the messaging provider (commented out for development)
+    // if (!validateWebhookSignature(req)) {
     //   return res.status(403).send('Forbidden');
     // }
     
+    // Parse webhook data using provider-specific parser
+    const webhookData = messagingProvider.parseIncomingWebhook(req, 'sms');
     const {
-      From: fromNumber,
-      To: toNumber,
-      Body: messageBody,
-      MessageSid: messageSid,
-      NumMedia: numMedia
-    } = req.body;
+      from: fromNumber,
+      to: toNumber,
+      body: messageBody,
+      messageSid,
+      numMedia
+    } = webhookData;
     
     if (!fromNumber || !toNumber || !messageBody) {
       logger.error('Missing required fields in SMS webhook');
@@ -227,22 +224,26 @@ router.post('/sms', async (req, res) => {
  */
 router.post('/whatsapp', async (req, res) => {
   try {
+    logger.info('POST /api/webhooks/whatsapp');
+    logger.info(`Provider: ${messagingProvider.getProviderName()}`);
     logger.info('Received WhatsApp webhook:', req.body);
     
-    // Validate the request is from Twilio (commented out for development)
-    // if (!validateTwilioSignature(req)) {
+    // Validate the request is from the messaging provider (commented out for development)
+    // if (!validateWebhookSignature(req)) {
     //   return res.status(403).send('Forbidden');
     // }
     
+    // Parse webhook data using provider-specific parser
+    const webhookData = messagingProvider.parseIncomingWebhook(req, 'whatsapp');
     const {
-      From: fromNumber,
-      To: toNumber,
-      Body: messageBody,
-      MessageSid: messageSid,
-      NumMedia: numMedia
-    } = req.body;
+      from: fromNumber,
+      to: toNumber,
+      body: messageBody,
+      messageSid,
+      numMedia
+    } = webhookData;
     
-    // WhatsApp numbers are prefixed with "whatsapp:"
+    // WhatsApp numbers may be prefixed with "whatsapp:" - clean them
     const cleanFromNumber = fromNumber?.replace('whatsapp:', '');
     const cleanToNumber = toNumber?.replace('whatsapp:', '');
     
@@ -751,6 +752,77 @@ router.get('/health', (req, res) => {
       whatsapp_status: '/api/webhooks/whatsapp/status'
     }
   });
+});
+
+/**
+ * AWS SNS webhook endpoint
+ * AWS SNS will POST to this URL for SMS delivery notifications and incoming messages
+ */
+router.post('/aws-sns', async (req, res) => {
+  try {
+    logger.info('POST /api/webhooks/aws-sns');
+    logger.info('Received AWS SNS webhook:', req.body);
+    
+    const body = req.body;
+    
+    // Handle SNS subscription confirmation
+    if (body.Type === 'SubscriptionConfirmation') {
+      logger.info('AWS SNS subscription confirmation received');
+      logger.info('SubscribeURL:', body.SubscribeURL);
+      
+      // Confirm subscription
+      if (messagingProvider.confirmSNSSubscription) {
+        await messagingProvider.confirmSNSSubscription(body.SubscribeURL);
+        return res.status(200).json({ message: 'Subscription confirmed' });
+      }
+      
+      return res.status(200).json({ 
+        message: 'Subscription confirmation received',
+        subscribeUrl: body.SubscribeURL 
+      });
+    }
+    
+    // Handle incoming SMS
+    if (body.Type === 'Notification') {
+      const webhookData = messagingProvider.parseIncomingWebhook(req, 'sms');
+      
+      logger.info('AWS SNS SMS notification:', webhookData);
+      
+      // Process the message using the same logic as the SMS endpoint
+      // You can extract common logic into a separate function if needed
+      
+      return res.status(200).json({ message: 'SMS received' });
+    }
+    
+    res.status(200).json({ message: 'Webhook received' });
+  } catch (error) {
+    logger.error('Error processing AWS SNS webhook:', error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+/**
+ * AWS WhatsApp webhook endpoint
+ * AWS End User Messaging Social will POST to this URL for WhatsApp messages
+ */
+router.post('/aws-whatsapp', async (req, res) => {
+  try {
+    logger.info('POST /api/webhooks/aws-whatsapp');
+    logger.info('Received AWS WhatsApp webhook:', req.body);
+    
+    // Parse using the AWS provider
+    const webhookData = messagingProvider.parseIncomingWebhook(req, 'whatsapp');
+    
+    logger.info('AWS WhatsApp message:', webhookData);
+    
+    // Process the message using the same logic as the WhatsApp endpoint
+    // You can extract common logic into a separate function if needed
+    
+    res.status(200).json({ message: 'WhatsApp message received' });
+  } catch (error) {
+    logger.error('Error processing AWS WhatsApp webhook:', error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
 });
 
 module.exports = router;
