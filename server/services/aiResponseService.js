@@ -163,6 +163,18 @@ class AIResponseService {
     try {
       logger.info(`Calling external chat API for session: ${sessionId} `);
       logger.info(`Communication type: ${communicationType}`);
+      logger.info(`Message: ${message}`);
+      logger.info(`session_id: ${sessionId}`);
+      if(typeof sessionId === 'object' && sessionId._id) {
+        sessionId = sessionId._id.toString();
+      }
+      
+      logger.info('req body', JSON.stringify({
+        actor_id: '123434tdfg423234',
+        session_id: sessionId,
+        message: message,
+        enable_tools: false
+      }));
       
       const response = await axios.post('http://127.0.0.1:8100/chat', {
         actor_id: '123434tdfg423234',
